@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --color-brand-50: #eef4ff;
+  --color-brand-100: #dbe6fe;
+  --color-brand-500: #3b6cf6;
+  --color-brand-600: #2752e6;
+  --color-brand-700: #1f42c4;
+}
+
+body {
+  background: var(--color-slate-50);
+  color: var(--color-slate-900);
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-xs transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply border-brand-600 bg-brand-600 text-white hover:bg-brand-700;
+  }
+  .btn-danger {
+    @apply border-red-200 text-red-700 hover:bg-red-50;
+  }
+  .btn-ghost {
+    @apply border-transparent bg-transparent shadow-none hover:bg-slate-100;
+  }
+  .input {
+    @apply block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-xs placeholder:text-slate-400 focus:border-brand-500 focus:ring-2 focus:ring-brand-100 focus:outline-none;
+  }
+  .label {
+    @apply mb-1 block text-sm font-medium text-slate-700;
+  }
+  .card {
+    @apply rounded-xl border border-slate-200 bg-white shadow-xs;
+  }
+  .chip {
+    @apply inline-flex items-center rounded-md bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-600;
+  }
+}
+
+/* docx-preview output inside the preview pane */
+.dd-preview .docx-wrapper {
+  background: transparent;
+  padding: 24px 0;
+}
+.dd-preview .docx-wrapper > section.docx {
+  box-shadow: 0 1px 3px rgb(15 23 42 / 0.12), 0 8px 24px rgb(15 23 42 / 0.08);
+  margin-bottom: 24px;
+}
+.dd-preview .dd-focus-para {
+  background: rgb(250 204 21 / 0.28);
+  outline: 2px solid rgb(250 204 21 / 0.7);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
