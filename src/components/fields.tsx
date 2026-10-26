@@ -135,7 +135,9 @@ export function FieldDialog({
       } else {
         await onPick(await createField(workspaceId, e.currentTarget), true);
       }
-      onClose();
+      // Close right away (the "close" event then calls onClose), so focus is free for the
+      // caller, e.g. to type the inserted field into the editor.
+      ref.current?.close();
     } catch (err) {
       setError((err as Error).message);
     } finally {

@@ -3,9 +3,10 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { config } from "./config";
+import { escapeText } from "./docx/rich";
 
 // Each entry upgrades the schema by one version (PRAGMA user_version). Append, never edit.
-const MIGRATIONS = [
+const MIGRATIONS: (string | ((db: Database.Database) => void))[] = [
   `
   CREATE TABLE users (
     id            TEXT PRIMARY KEY,
@@ -129,6 +130,16 @@ const MIGRATIONS = [
   ALTER TABLE documents ADD COLUMN set_id TEXT REFERENCES sets (id) ON DELETE CASCADE;
   CREATE INDEX documents_set ON documents (set_id);
   `,
+  // v3: block edits are rich markup (<b> <i> <u>); escape the plain text saved before.
+  (db) => {
+    const rows = db.prepare("SELECT id, values_json FROM documents").all() as { id: string; values_json: string }[];
+    const update = db.prepare("UPDATE documents SET values_json = ? WHERE id = ?");
+    for (const row of rows) {
+      const values = JSON.parse(row.values_json) as Record<string, string>;
+      for (const k of Object.keys(values)) values[k] = escapeText(values[k]);
+      update.run(JSON.stringify(values), row.id);
+    }
+  },
 ];
 
 function open(): Database.Database {
@@ -140,7 +151,9 @@ function open(): Database.Database {
   const version = db.pragma("user_version", { simple: true }) as number;
   for (let v = version; v < MIGRATIONS.length; v++) {
     db.transaction(() => {
-      db.exec(MIGRATIONS[v]);
+      const step = MIGRATIONS[v];
+      if (typeof step === "string") db.exec(step);
+      else step(db);
       db.pragma(`user_version = ${v + 1}`);
     })();
   }

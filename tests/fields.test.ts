@@ -39,6 +39,7 @@ test("formats dates and numbers", () => {
 
 test("resolves tokens by name, case-insensitively; leaves unknown and empty ones", () => {
   const fields = [field({ id: "a", name: "Client name" }), field({ id: "b", name: "Date", type: "date" })];
+  assert.equal(resolveTokens("<b>{{Client name}}</b>", fields, { a: "A & B" }, true), "<b>A &amp; B</b>");
   const out = resolveTokens("{{client NAME}} · {{Date}} · {{Nope}} · {{ Date }}", fields, { a: "ACME", b: "2026-01-02" });
   assert.equal(out, "ACME · 2 Januari 2026 · {{Nope}} · 2 Januari 2026");
   assert.equal(resolveTokens("{{Date}}", fields, {}), "{{Date}}");
@@ -52,7 +53,7 @@ test("marked ranges are replaced in place and keep run formatting", async () => 
   const marks: Mark[] = [{ id: "m1", block_id: body.id, start, end: start + 20, field_id: "p" }];
   const fields = [field({ id: "p", name: "Project" })];
 
-  assert.equal(baseTexts(blocks, marks, fields).get(body.id), "Norflabs will deliver {{Project}} described in the attached proposal.");
+  assert.equal(baseTexts(blocks, marks, fields).get(body.id), "Norflabs will deliver <b>{{Project}}</b> described in the attached proposal.");
   const edits = computeEdits(blocks, {}, marks, fields, { p: "the mobile app" });
   const out = await applyEdits(sample, edits);
   const xml = await (await JSZip.loadAsync(out)).file("word/document.xml")!.async("string");

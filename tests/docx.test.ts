@@ -77,8 +77,10 @@ test("edited paragraph takes the first run's formatting, handles newlines and ta
 
 test("writes text into an empty paragraph and escapes XML", async () => {
   const empty = (await extractBlocks(sample)).filter((b) => b.region === "body" && b.empty).at(-1)!;
-  const out = await applyEdits(sample, { [empty.id]: "<b>Tom & Jerry</b>" });
-  assert.equal((await extractBlocks(out)).find((b) => b.id === empty.id)!.text, "<b>Tom & Jerry</b>");
+  const out = await applyEdits(sample, { [empty.id]: "&lt;b&gt;Tom &amp; Jerry&lt;/b&gt;" });
+  const after = (await extractBlocks(out)).find((b) => b.id === empty.id)!;
+  assert.equal(after.text, "<b>Tom & Jerry</b>");
+  assert.equal(after.rich, "&lt;b&gt;Tom &amp; Jerry&lt;/b&gt;");
 });
 
 test("hyperlink paragraphs stay valid after editing", async () => {
