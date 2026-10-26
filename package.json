@@ -8,7 +8,7 @@
     "start": "node .next/standalone/server.js",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "tsx --conditions=react-server --test tests/*.test.*",
     "make-sample": "python3 scripts/make-sample.py"
   },
   "dependencies": {

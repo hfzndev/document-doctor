@@ -33,6 +33,38 @@ Sign-in goes through **[Norflabs Auth](https://auth.norflabs.com)** (app slug `d
 - Paragraphs belonging to a field that spans several paragraphs, like a table of contents, are
   shown read-only.
 
+## Sets & shared fields (auto-filled values)
+
+Some values have to be identical across several documents: a document number, a date, a client
+name. **Shared fields** handle this:
+
+1. **Mark the text on the template.** On the template page, open **Shared fields**, select the
+   sample text (e.g. `001/INV/X/2026`), click **Mark as field**, and pick an existing field or
+   create one. You can mark the same field in several places and in several templates.
+2. **Create a set** on the workspace page, e.g. *PT ACME – October*, and tick the templates it
+   should start with. The set holds one value per field, and every document in it shows that value.
+   Change it on the set page or in any document's *Shared fields* panel, and every document in
+   the set follows.
+3. **Download the whole set** as one ZIP of DOCX or PDF files.
+
+Field types (manage them under **Workspace → Shared fields**):
+
+| Type | Starting value in a new set | Written as |
+| --- | --- | --- |
+| Text | the field's default value, if it has one | as typed |
+| Date | today (`APP_TIMEZONE`, default Asia/Jakarta) | `26 Oktober 2026`, `26/10/2026` or `2026-10-26` |
+| Auto number | the next number from the field's counter | a pattern, e.g. `{seq:3}/INV/{roman}/{yyyy}` → `001/INV/X/2026` |
+
+Number patterns use `{seq}` / `{seq:3}` (zero-padded), `{yyyy}` `{yy}` `{mm}` `{dd}`, and
+`{roman}` (the month as I–XII). Each field's counter restarts every year, every month or never.
+Every new set takes the next number once; you can still overwrite it by hand.
+
+In the document editor a field shows as `{{Field name}}`. Use **+ Field** on a paragraph to insert
+one. To turn existing text into a field, select it and click **Make field**: the selected text
+becomes the field's value. A document that isn't in a set keeps its own values. When a marked
+paragraph isn't otherwise edited, only the marked characters are replaced, so bold or other
+formatting around them stays.
+
 ## Workspaces & sharing
 
 - Anyone with access to the `docs` app in Norflabs Auth can sign in and create workspaces.
@@ -83,9 +115,10 @@ To test the real sign-in flow locally, run norflabs-auth on `:9140` with
 `AUTH_BASE_URL=http://127.0.0.1:9140 AUTH_COOKIE_SECURE=0`, register the `docs` app with origin
 `http://localhost:3000`, and set `NL_AUTH_BASE_URL=http://127.0.0.1:9140`.
 
-`fixtures/sample-letter.docx` is a sample template with a header, a title, headings, lists, a
-table, a hyperlink and a page-number footer (`npm run make-sample` regenerates it with
-python-docx).
+`fixtures/` has two sample templates: `sample-letter.docx`, an agreement with a header, title,
+headings, lists, a table, a hyperlink and a page-number footer, and `sample-invoice.docx`, with a
+number, a date and a client to mark as shared fields. `npm run make-sample` regenerates both with
+python-docx.
 
 ## Configuration
 
@@ -97,6 +130,7 @@ python-docx).
 | `NL_APP_SLUG` | `docs` | |
 | `SESSION_HOURS` | `12` | Fallback; norflabs-auth's per-app `session_hours` wins |
 | `DATA_DIR` | `./data` | SQLite database + uploaded templates |
+| `APP_TIMEZONE` | `Asia/Jakarta` | "Today" for date fields and the numbering period |
 | `SOFFICE_PATH` | `soffice` | LibreOffice binary |
 | `MAX_UPLOAD_MB` | `20` | |
 | `AUTH_DEV_LOGIN` | `false` | Local email-only sign-in. **Never enable on a server.** |
@@ -118,15 +152,18 @@ Without Docker: `npm ci && npm run build && npm start`, with LibreOffice install
 ## Development
 
 ```bash
-npm test          # template engine tests (extract / edit / fields / tokens / safety)
+npm test          # template engine, shared fields, numbering/data-layer tests
 npm run lint
 npm run typecheck
 ```
 
 ```
 src/lib/docx/        template engine, runs in both the browser (preview) and the server (export)
-  paragraph.ts       one <w:p> ⇄ editable text with [[tokens]]
+  paragraph.ts       one <w:p> ⇄ editable text with [[tokens]]; in-place span replacement
   template.ts        parts, block ids, styles, extractBlocks() / applyEdits()
+src/lib/fields.ts    shared fields: formats, number patterns, {{tokens}}, marks → edits (shared)
+src/lib/data-fields.ts  fields, counters, template marks, sets, field values (SQL)
+src/lib/render.ts    server-side document assembly (export, set ZIP)
 src/lib/auth/        norflabs ticket redeem + our session cookie
 src/lib/data.ts      all SQL (better-sqlite3, migrations in db.ts)
 src/lib/access.ts    authorization helpers used by every page / action / route
@@ -145,6 +182,8 @@ src/components/      editor, live preview (docx-preview), upload
   faithful version.
 - **Last write wins** when two people edit the same document at the same moment. There's no
   real-time co-editing.
+- A paragraph that has been edited by hand shows its fields as `{{tokens}}`. If you delete a
+  token, that document stops following the field.
 - Block ids are tied to the template file. To change a template's layout, upload it as a new
   template; existing documents keep using the old one.
 - Templates with linked (external) images: LibreOffice may try to fetch them during PDF export.

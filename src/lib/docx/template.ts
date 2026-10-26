@@ -1,7 +1,7 @@
 // Template engine: turn a .docx into editable blocks and write edits back.
 // Runs unchanged on the server (export) and in the browser (live preview).
 import JSZip from "jszip";
-import { readParagraph, writeParagraph } from "./paragraph";
+import { readParagraph, writeParagraph, writeSpans, type Span } from "./paragraph";
 import {
   child,
   children,
@@ -40,6 +40,9 @@ export type Block = {
 };
 
 export type Values = Record<string, string>;
+/** Per block: new full text, or character ranges to replace (keeps run formatting). */
+export type Edits = Record<string, string | Span[]>;
+export type { Span };
 
 export class TemplateError extends Error {}
 
@@ -197,16 +200,16 @@ export type ApplyOptions = {
 /** Write edited text back into the document. Unedited paragraphs are left byte-for-byte. */
 export async function applyEdits(
   data: ArrayBuffer | Uint8Array,
-  values: Values,
+  values: Edits,
   opts: ApplyOptions = {},
 ): Promise<Uint8Array> {
   const zip = await loadZip(data);
-  const byPart = new Map<string, Map<number, string>>();
+  const byPart = new Map<string, Map<number, string | Span[]>>();
   const touch = (part: string) => byPart.get(part) ?? byPart.set(part, new Map()).get(part)!;
-  for (const [id, text] of Object.entries(values)) {
+  for (const [id, edit] of Object.entries(values)) {
     const hash = id.lastIndexOf("#");
-    if (hash < 0 || typeof text !== "string") continue;
-    touch(id.slice(0, hash)).set(Number(id.slice(hash + 1)), text);
+    if (hash < 0 || (typeof edit !== "string" && !Array.isArray(edit))) continue;
+    touch(id.slice(0, hash)).set(Number(id.slice(hash + 1)), edit);
   }
   let focus: { part: string; index: number } | null = null;
   if (opts.focusBlockId) {
@@ -221,9 +224,10 @@ export async function applyEdits(
     const doc = (await readXml(zip, part))!;
     const paras = paragraphs(doc);
     let changed = false;
-    for (const [index, text] of edits) {
+    for (const [index, edit] of edits) {
       const p = paras[index];
-      if (p && writeParagraph(p, text)) changed = true;
+      if (!p) continue;
+      if (typeof edit === "string" ? writeParagraph(p, edit) : writeSpans(p, edit)) changed = true;
     }
     if (focus?.part === part && paras[focus.index]) {
       addFocusBookmark(paras[focus.index]);

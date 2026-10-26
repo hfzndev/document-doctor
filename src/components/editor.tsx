@@ -4,7 +4,9 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { applyEdits, extractBlocks, type Block, type Values } from "@/lib/docx/template";
+import { baseTexts, computeEdits, referencedFields, type Field, type FieldValues, type Mark } from "@/lib/fields";
 import { DocxPreview } from "./docx-preview";
+import { FieldDialog, FieldValuesList, useFieldValues } from "./fields";
 
 type Props = {
   documentId: string;
@@ -15,7 +17,14 @@ type Props = {
   initialTitle: string;
   initialValues: Values;
   menu: React.ReactNode;
+  fields: Field[];
+  marks: Mark[];
+  fieldValues: FieldValues;
+  /** The set this document belongs to (shares its field values), if any. */
+  set: { id: string; name: string; documents: number } | null;
 };
+
+type InsertTarget = { blockId: string | null; start: number; end: number; selected: string };
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
 
@@ -33,6 +42,10 @@ export function Editor(props: Props) {
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<"edit" | "preview">("edit");
   const [exporting, setExporting] = useState<string | null>(null);
+  const [fields, setFields] = useState<Field[]>(props.fields);
+  const fv = useFieldValues(props.set ? { type: "set", id: props.set.id } : { type: "document", id: documentId }, props.fieldValues);
+  const [insert, setInsert] = useState<InsertTarget | null>(null);
+  const [newFieldName, setNewFieldName] = useState<string | undefined>();
 
   // ---------------------------------------------------------------- load template
   useEffect(() => {
@@ -54,14 +67,15 @@ export function Editor(props: Props) {
     if (!template) return;
     let cancelled = false;
     const t = setTimeout(async () => {
-      const out = await applyEdits(template, values, { focusBlockId: focusId });
+      const edits = computeEdits(blocks ?? [], values, props.marks, fields, fv.values);
+      const out = await applyEdits(template, edits, { focusBlockId: focusId });
       if (!cancelled) setPreview(out);
     }, 250);
     return () => {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [template, values, focusId]);
+  }, [template, blocks, values, focusId, props.marks, fields, fv.values]);
 
   // ---------------------------------------------------------------- autosave
   const pending = useRef<{ title: string; values: Values } | null>(null);
@@ -112,7 +126,41 @@ export function Editor(props: Props) {
   }, []);
 
   // ---------------------------------------------------------------- editing
-  const original = useMemo(() => new Map(blocks?.map((b) => [b.id, b.text]) ?? []), [blocks]);
+  // A block's starting text: the template text, with marked ranges shown as {{Field}}.
+  const bases = useMemo(() => (blocks ? baseTexts(blocks, props.marks, fields) : new Map<string, string>()), [blocks, props.marks, fields]);
+  const original = useMemo(
+    () => new Map(blocks?.map((b) => [b.id, bases.get(b.id) ?? b.text]) ?? []),
+    [blocks, bases],
+  );
+  const referenced = useMemo(
+    () => (blocks ? referencedFields(blocks, values, props.marks, fields) : { used: [], unknown: [] }),
+    [blocks, values, props.marks, fields],
+  );
+
+  // Fields that just came into use (inserted or created) get their starting value.
+  const ensured = useRef(new Set(Object.keys(props.fieldValues)));
+  const { ensure } = fv;
+  useEffect(() => {
+    const missing = referenced.used.filter((f) => fv.values[f.id] === undefined && !ensured.current.has(f.id));
+    if (!missing.length) return;
+    missing.forEach((f) => ensured.current.add(f.id));
+    ensure(missing.map((f) => f.id));
+  }, [referenced.used, fv.values, ensure]);
+
+  async function pickField(field: Field, created: boolean) {
+    if (created) setFields((list) => [...list, field].sort((a, b) => a.name.localeCompare(b.name)));
+    const target = insert;
+    if (!target?.blockId) return;
+    const b = blocks?.find((x) => x.id === target.blockId);
+    if (!b) return;
+    const current = values[b.id] ?? original.get(b.id) ?? b.text;
+    setText(b.id, current.slice(0, target.start) + `{{${field.name}}}` + current.slice(target.end));
+    // "Select text → make field": the selected text becomes the value if there is none yet.
+    if (target.selected && fv.values[field.id] === undefined && field.type !== "date") {
+      ensured.current.add(field.id);
+      await fv.ensure([field.id], { [field.id]: target.selected });
+    }
+  }
 
   const setText = useCallback(
     (id: string, text: string) => {
@@ -133,7 +181,7 @@ export function Editor(props: Props) {
   async function download(format: "docx" | "pdf") {
     setExporting(format);
     try {
-      await flush();
+      await Promise.all([flush(), fv.flush()]);
       const res = await fetch(`/api/documents/${documentId}/export?format=${format}`);
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `Export failed (${res.status})`);
       const url = URL.createObjectURL(await res.blob());
@@ -154,7 +202,7 @@ export function Editor(props: Props) {
   // ---------------------------------------------------------------- grouping
   const q = query.trim().toLowerCase();
   const visible = (blocks ?? []).filter((b) => {
-    const text = values[b.id] ?? b.text;
+    const text = values[b.id] ?? original.get(b.id) ?? b.text;
     if (!showEmpty && b.empty && !(b.id in values)) return false;
     return !q || text.toLowerCase().includes(q) || b.style.toLowerCase().includes(q);
   });
@@ -175,6 +223,12 @@ export function Editor(props: Props) {
           <div className="truncate text-xs text-slate-500">
             <Link href={`/w/${props.workspaceId}`} className="hover:text-slate-800">{props.workspaceName}</Link> ·{" "}
             <Link href={`/t/${templateId}`} className="hover:text-slate-800">{props.templateName}</Link>
+            {props.set && (
+              <>
+                {" "}·{" "}
+                <Link href={`/s/${props.set.id}`} className="font-medium text-brand-700 hover:underline">{props.set.name}</Link>
+              </>
+            )}
           </div>
           <input
             value={title}
@@ -184,7 +238,7 @@ export function Editor(props: Props) {
             className="-ml-1 w-full max-w-xl truncate rounded px-1 text-lg font-semibold tracking-tight hover:bg-slate-100 focus:bg-white focus:ring-2 focus:ring-brand-100 focus:outline-none"
           />
         </div>
-        <SaveBadge state={save} onRetry={flush} />
+        <SaveBadge state={save === "saved" && fv.state !== "saved" ? (fv.state === "error" ? "error" : "saving") : save} onRetry={() => { flush(); fv.flush(); }} />
         <button className="btn" onClick={() => download("docx")} disabled={!blocks || !!exporting}>
           {exporting === "docx" ? "Preparing…" : <><span className="hidden sm:inline">Download</span> DOCX</>}
         </button>
@@ -193,6 +247,26 @@ export function Editor(props: Props) {
         </button>
         {props.menu}
       </div>
+
+      <FieldDialog
+        open={!!insert}
+        workspaceId={props.workspaceId}
+        fields={newFieldName ? [] : fields}
+        suggestedName={newFieldName}
+        title={insert?.selected ? "Make the selection a shared field" : newFieldName ? "Create field" : "Insert a shared field"}
+        hint={
+          insert?.selected ? (
+            <>
+              “{insert.selected.slice(0, 80)}” becomes a field. Its value is filled in everywhere the field is used
+              {props.set ? " in this set" : ""}.
+            </>
+          ) : (
+            "Fields are typed once and appear in every document that uses them."
+          )
+        }
+        onClose={() => setInsert(null)}
+        onPick={pickField}
+      />
 
       {/* mobile tabs */}
       <div className="flex border-b border-slate-200 bg-white lg:hidden">
@@ -236,6 +310,38 @@ export function Editor(props: Props) {
             {blocks && visible.length === 0 && (
               <p className="mt-10 text-center text-sm text-slate-500">Nothing matches “{query}”.</p>
             )}
+            {blocks && (referenced.used.length > 0 || referenced.unknown.length > 0) && (
+              <div className="mt-4 rounded-xl border border-brand-100 bg-brand-50/60 p-4">
+                <div className="mb-3 flex flex-wrap items-baseline gap-x-2">
+                  <h3 className="text-sm font-semibold">Shared fields</h3>
+                  <span className="text-xs text-slate-500">
+                    {props.set ? (
+                      <>
+                        Shared with {props.set.documents === 1 ? "this document" : `all ${props.set.documents} documents`} in{" "}
+                        <Link href={`/s/${props.set.id}`} className="font-medium text-brand-700 hover:underline">{props.set.name}</Link>
+                      </>
+                    ) : (
+                      "Used wherever {{Field}} appears in this document"
+                    )}
+                  </span>
+                </div>
+                <FieldValuesList fields={referenced.used} values={fv.values} onChange={fv.update} />
+                {referenced.unknown.map((name) => (
+                  <p key={name} className="mt-2 text-xs text-amber-700">
+                    <code>{`{{${name}}}`}</code> is not a field yet.{" "}
+                    <button
+                      className="font-medium underline"
+                      onClick={() => {
+                        setNewFieldName(name);
+                        setInsert({ blockId: null, start: 0, end: 0, selected: "" });
+                      }}
+                    >
+                      Create it
+                    </button>
+                  </p>
+                ))}
+              </div>
+            )}
             {groups.map((g, i) => (
               <div key={`${g.label}-${i}`} className="mt-5">
                 <h3 className="sticky top-0 z-10 -mx-4 mb-2 bg-white/95 px-4 py-1.5 text-xs font-semibold tracking-wide text-slate-500 uppercase backdrop-blur">
@@ -246,11 +352,16 @@ export function Editor(props: Props) {
                     <BlockField
                       key={b.id}
                       block={b}
-                      value={values[b.id] ?? b.text}
+                      value={values[b.id] ?? original.get(b.id) ?? b.text}
+                      base={original.get(b.id) ?? b.text}
                       edited={b.id in values}
                       focused={focusId === b.id}
                       onFocus={() => setFocusId(b.id)}
                       onChange={(text) => setText(b.id, text)}
+                      onInsertField={(start, end, selected) => {
+                        setNewFieldName(undefined);
+                        setInsert({ blockId: b.id, start, end, selected });
+                      }}
                     />
                   ))}
                 </div>
@@ -292,18 +403,23 @@ const KIND_CLASS: Record<string, string> = {
 function BlockField({
   block,
   value,
+  base,
   edited,
   focused,
   onFocus,
   onChange,
+  onInsertField,
 }: {
   block: Block;
   value: string;
+  base: string;
   edited: boolean;
   focused: boolean;
   onFocus: () => void;
   onChange: (text: string) => void;
+  onInsertField: (start: number, end: number, selected: string) => void;
 }) {
+  const [hasSelection, setHasSelection] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     const el = ref.current;
@@ -322,6 +438,10 @@ function BlockField({
   const kindKey =
     block.kind === "heading" ? (block.level <= 1 ? "h1" : block.level === 2 ? "h2" : "h3") : block.kind;
   const hasTokens = /\[\[[^\]]+\]\]/.test(block.text);
+  const trackSelection = () => {
+    const el = ref.current;
+    setHasSelection(!!el && el.selectionEnd > el.selectionStart);
+  };
 
   return (
     <div
@@ -335,10 +455,22 @@ function BlockField({
         {block.locked && <span className="chip bg-slate-200">Read-only field</span>}
         {edited && <span className="text-[11px] font-medium text-amber-600">Edited</span>}
         <div className="flex-1" />
+        {focused && !block.locked && (
+          <button
+            className="rounded px-1.5 text-[11px] font-medium text-brand-700 hover:bg-brand-100"
+            onMouseDown={(e) => e.preventDefault()} // keep the textarea selection
+            onClick={() => {
+              const el = ref.current!;
+              onInsertField(el.selectionStart, el.selectionEnd, el.value.slice(el.selectionStart, el.selectionEnd).trim() ? el.value.slice(el.selectionStart, el.selectionEnd) : "");
+            }}
+          >
+            {hasSelection ? "Make field" : "+ Field"}
+          </button>
+        )}
         {edited && (
           <button
             className="text-[11px] text-slate-400 opacity-0 group-hover:opacity-100 hover:text-slate-700 focus:opacity-100"
-            onClick={() => onChange(block.text)}
+            onClick={() => onChange(base)}
           >
             Reset
           </button>
@@ -353,6 +485,9 @@ function BlockField({
           readOnly={block.locked}
           onFocus={onFocus}
           onChange={(e) => onChange(e.target.value)}
+          onSelect={trackSelection}
+          onMouseUp={trackSelection}
+          onKeyUp={trackSelection}
           placeholder="(empty line)"
           className={`w-full resize-none overflow-hidden rounded-md border border-transparent bg-transparent px-1.5 py-1 hover:border-slate-200 focus:border-brand-500 focus:bg-white focus:outline-none ${KIND_CLASS[kindKey]} ${block.locked ? "text-slate-500" : ""}`}
         />

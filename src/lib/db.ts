@@ -73,6 +73,62 @@ const MIGRATIONS = [
   );
   CREATE INDEX documents_workspace ON documents (workspace_id, updated_at DESC);
   `,
+  // v2: shared fields, template marks, document sets
+  `
+  CREATE TABLE fields (
+    id             TEXT PRIMARY KEY,
+    workspace_id   TEXT NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    name           TEXT NOT NULL,
+    type           TEXT NOT NULL CHECK (type IN ('text', 'date', 'number')),
+    date_format    TEXT NOT NULL DEFAULT 'id_long' CHECK (date_format IN ('id_long', 'dmy', 'iso')),
+    number_pattern TEXT NOT NULL DEFAULT '{seq:3}',
+    number_reset   TEXT NOT NULL DEFAULT 'yearly' CHECK (number_reset IN ('yearly', 'monthly', 'never')),
+    default_value  TEXT NOT NULL DEFAULT '',
+    created_by     TEXT NOT NULL REFERENCES users (id),
+    created_at     INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX fields_name ON fields (workspace_id, name COLLATE NOCASE);
+
+  CREATE TABLE field_counters (
+    field_id   TEXT NOT NULL REFERENCES fields (id) ON DELETE CASCADE,
+    period     TEXT NOT NULL,
+    last_value INTEGER NOT NULL,
+    PRIMARY KEY (field_id, period)
+  );
+
+  CREATE TABLE template_marks (
+    id          TEXT PRIMARY KEY,
+    template_id TEXT NOT NULL REFERENCES templates (id) ON DELETE CASCADE,
+    block_id    TEXT NOT NULL,
+    start       INTEGER NOT NULL,
+    "end"       INTEGER NOT NULL,
+    field_id    TEXT NOT NULL REFERENCES fields (id) ON DELETE CASCADE,
+    created_at  INTEGER NOT NULL
+  );
+  CREATE INDEX template_marks_template ON template_marks (template_id);
+
+  CREATE TABLE sets (
+    id           TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    created_by   TEXT NOT NULL REFERENCES users (id),
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+  );
+  CREATE INDEX sets_workspace ON sets (workspace_id, updated_at DESC);
+
+  -- owner_id is a set id, or a document id for documents that are not in a set
+  CREATE TABLE field_values (
+    owner_id   TEXT NOT NULL,
+    field_id   TEXT NOT NULL REFERENCES fields (id) ON DELETE CASCADE,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (owner_id, field_id)
+  );
+
+  ALTER TABLE documents ADD COLUMN set_id TEXT REFERENCES sets (id) ON DELETE CASCADE;
+  CREATE INDEX documents_set ON documents (set_id);
+  `,
 ];
 
 function open(): Database.Database {

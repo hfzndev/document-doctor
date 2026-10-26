@@ -35,6 +35,7 @@ export type DocumentRow = {
   id: string;
   workspace_id: string;
   template_id: string;
+  set_id: string | null;
   title: string;
   values_json: string;
   created_by: string;
@@ -43,6 +44,7 @@ export type DocumentRow = {
   updated_at: number;
   template_name?: string;
   updater_name?: string;
+  set_name?: string | null;
 };
 
 const INVITE_DAYS = 14;
@@ -264,39 +266,54 @@ export function updateTemplate(id: string, name: string, description: string) {
 }
 
 export function deleteTemplate(id: string) {
-  db().prepare("DELETE FROM templates WHERE id = ?").run(id);
+  db().transaction(() => {
+    db()
+      .prepare("DELETE FROM field_values WHERE owner_id IN (SELECT id FROM documents WHERE template_id = ?)")
+      .run(id);
+    db().prepare("DELETE FROM templates WHERE id = ?").run(id);
+  })();
 }
 
 // ----------------------------------------------------------------- documents
-export function createDocument(workspaceId: string, templateId: string, title: string, userId: string): string {
+export function createDocument(
+  workspaceId: string,
+  templateId: string,
+  title: string,
+  userId: string,
+  setId: string | null = null,
+): string {
   const id = randomUUID();
   const t = now();
   db()
     .prepare(
-      `INSERT INTO documents (id, workspace_id, template_id, title, values_json, created_by, updated_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, '{}', ?, ?, ?, ?)`,
+      `INSERT INTO documents (id, workspace_id, template_id, set_id, title, values_json, created_by, updated_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, '{}', ?, ?, ?, ?)`,
     )
-    .run(id, workspaceId, templateId, title, userId, userId, t, t);
+    .run(id, workspaceId, templateId, setId, title, userId, userId, t, t);
   return id;
 }
 
-export function listDocuments(workspaceId: string, templateId?: string): DocumentRow[] {
+export function listDocuments(workspaceId: string, filter: { templateId?: string; setId?: string } = {}): DocumentRow[] {
+  const templateId = filter.templateId ?? null;
+  const setId = filter.setId ?? null;
   return db()
     .prepare(
-      `SELECT d.*, t.name AS template_name, u.name AS updater_name
+      `SELECT d.*, t.name AS template_name, u.name AS updater_name, s.name AS set_name
        FROM documents d JOIN templates t ON t.id = d.template_id JOIN users u ON u.id = d.updated_by
-       WHERE d.workspace_id = ? AND (? IS NULL OR d.template_id = ?)
+       LEFT JOIN sets s ON s.id = d.set_id
+       WHERE d.workspace_id = ? AND (? IS NULL OR d.template_id = ?) AND (? IS NULL OR d.set_id = ?)
        ORDER BY d.updated_at DESC`,
     )
-    .all(workspaceId, templateId ?? null, templateId ?? null) as DocumentRow[];
+    .all(workspaceId, templateId, templateId, setId, setId) as DocumentRow[];
 }
 
 export function getDocument(id: string): DocumentRow | null {
   return (
     (db()
       .prepare(
-        `SELECT d.*, t.name AS template_name, u.name AS updater_name
+        `SELECT d.*, t.name AS template_name, u.name AS updater_name, s.name AS set_name
          FROM documents d JOIN templates t ON t.id = d.template_id JOIN users u ON u.id = d.updated_by
+         LEFT JOIN sets s ON s.id = d.set_id
          WHERE d.id = ?`,
       )
       .get(id) as DocumentRow | undefined) ?? null
@@ -316,11 +333,25 @@ export function updateDocument(id: string, fields: { title?: string; values?: Re
 }
 
 export function duplicateDocument(doc: DocumentRow, userId: string): string {
-  const id = createDocument(doc.workspace_id, doc.template_id, `${doc.title} (copy)`, userId);
-  db().prepare("UPDATE documents SET values_json = ? WHERE id = ?").run(doc.values_json, id);
+  const id = createDocument(doc.workspace_id, doc.template_id, `${doc.title} (copy)`, userId, doc.set_id);
+  db().transaction(() => {
+    db().prepare("UPDATE documents SET values_json = ? WHERE id = ?").run(doc.values_json, id);
+    if (!doc.set_id) {
+      // Standalone documents own their field values; copy them too.
+      db()
+        .prepare(
+          `INSERT INTO field_values (owner_id, field_id, value, updated_at)
+           SELECT ?, field_id, value, updated_at FROM field_values WHERE owner_id = ?`,
+        )
+        .run(id, doc.id);
+    }
+  })();
   return id;
 }
 
 export function deleteDocument(id: string) {
-  db().prepare("DELETE FROM documents WHERE id = ?").run(id);
+  db().transaction(() => {
+    db().prepare("DELETE FROM field_values WHERE owner_id = ?").run(id);
+    db().prepare("DELETE FROM documents WHERE id = ?").run(id);
+  })();
 }

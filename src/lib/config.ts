@@ -27,6 +27,9 @@ export const config = {
    */
   devLogin: env("AUTH_DEV_LOGIN") === "true",
 
+  /** Used for "today" in date fields and for numbering periods. */
+  timeZone: env("APP_TIMEZONE", "Asia/Jakarta"),
+
   sofficePath: env("SOFFICE_PATH", "soffice"),
   maxUploadBytes: (Number(env("MAX_UPLOAD_MB", "20")) || 20) * 1024 * 1024,
 };

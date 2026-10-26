@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import { deleteDocument, duplicateDocument } from "@/app/actions";
 import { requireDocument, requireUser } from "@/lib/access";
-import { getDocument } from "@/lib/data";
+import { getDocument, listDocuments } from "@/lib/data";
+import { documentContext } from "@/lib/render";
 import { Editor } from "@/components/editor";
 import { ConfirmButton } from "@/components/ui";
 
@@ -15,6 +16,8 @@ export default async function DocumentPage({ params }: PageProps<"/d/[id]">) {
   const user = await requireUser(`/d/${id}`);
   const { document, workspace, role } = requireDocument(id, user);
   const canDelete = document.created_by === user.id || role !== "member";
+  const ctx = await documentContext(document);
+  const setDocs = document.set_id ? listDocuments(workspace.id, { setId: document.set_id }).length : 0;
 
   const menu = (
     <details className="relative">
@@ -52,8 +55,12 @@ export default async function DocumentPage({ params }: PageProps<"/d/[id]">) {
       templateId={document.template_id}
       templateName={document.template_name ?? "Template"}
       initialTitle={document.title}
-      initialValues={JSON.parse(document.values_json)}
+      initialValues={ctx.docValues}
       menu={menu}
+      fields={ctx.fields}
+      marks={ctx.marks}
+      fieldValues={ctx.values}
+      set={document.set_id ? { id: document.set_id, name: document.set_name ?? "Set", documents: setDocs } : null}
     />
   );
 }

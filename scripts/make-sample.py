@@ -1,4 +1,5 @@
-"""Build fixtures/sample-letter.docx: a realistic template used by tests and the demo.
+"""Build the sample templates in fixtures/ used by tests and the demo:
+sample-letter.docx (agreement) and sample-invoice.docx (numbered, dated letter).
 
     python3 scripts/make-sample.py
 """
@@ -88,6 +89,28 @@ signature.runs[0].font.size = Pt(12)
 signature.runs[0].font.color.rgb = RGBColor(0x33, 0x33, 0x33)
 doc.add_paragraph("")
 
-out = Path(__file__).resolve().parent.parent / "fixtures" / "sample-letter.docx"
-doc.save(out)
-print(out)
+fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+doc.save(fixtures / "sample-letter.docx")
+print(fixtures / "sample-letter.docx")
+
+# --- invoice: a document number, a date and a client that repeat across documents
+inv = Document()
+s = inv.sections[0]
+s.header.paragraphs[0].text = "PT NORFLABS DIGITAL"
+foot = s.footer.paragraphs[0]
+foot.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+foot.add_run("Ref. 001/INV/X/2026 · page ")
+add_field(foot, "PAGE")
+
+inv.add_paragraph("INVOICE", style="Title")
+p = inv.add_paragraph()
+p.add_run("Nomor: ").bold = True
+p.add_run("001/INV/X/2026")
+p = inv.add_paragraph()
+p.add_run("Jakarta, 26 Oktober 2026")
+inv.add_paragraph("Kepada Yth. PT Contoh Sejahtera")
+inv.add_heading("Rincian", level=1)
+inv.add_paragraph("Pekerjaan desain ulang website sesuai penawaran.")
+inv.add_paragraph("Total: Rp 10.000.000")
+inv.save(fixtures / "sample-invoice.docx")
+print(fixtures / "sample-invoice.docx")

@@ -173,9 +173,15 @@ function templateRPr(p: XEl, info: ParagraphInfo): XEl | null {
 }
 
 function makeRun(p: XEl, rPr: XEl | null, text: string): XEl {
-  const doc = p.ownerDocument!;
-  const run = doc.createElementNS(W_NS, "w:r");
+  const run = p.ownerDocument!.createElementNS(W_NS, "w:r");
   if (rPr) run.appendChild(rPr.cloneNode(true));
+  appendText(run, text);
+  return run;
+}
+
+/** Append text to a run as w:t / w:tab / w:br children. */
+function appendText(run: XEl, text: string) {
+  const doc = run.ownerDocument!;
   for (const part of text.split(/(\t|\r?\n)/)) {
     if (!part) continue;
     if (part === "\t") run.appendChild(doc.createElementNS(W_NS, "w:tab"));
@@ -183,11 +189,54 @@ function makeRun(p: XEl, rPr: XEl | null, text: string): XEl {
     else {
       const t = doc.createElementNS(W_NS, "w:t");
       t.setAttribute("xml:space", "preserve");
-      t.appendChild(doc.createTextNode(part.replace(/‑/g, "-")));
+      t.appendChild(doc.createTextNode(part.replace(/\u2011/g, "-")));
       run.appendChild(t);
     }
   }
-  return run;
+}
+
+/** Replace a text run's content, keeping its formatting (w:rPr). */
+function setRunText(run: XEl, text: string) {
+  for (const c of children(run)) if (!isW(c, "rPr")) run.removeChild(c);
+  if (text) appendText(run, text);
+  else run.parentNode?.removeChild(run);
+}
+
+export type Span = { start: number; end: number; text: string };
+
+/**
+ * Replace character ranges of the paragraph text (offsets into readParagraph().text) while
+ * keeping every run's formatting: the replacement takes the formatting of the character it
+ * starts at. Spans must not cut through [[tokens]]; such spans are skipped.
+ */
+export function writeSpans(p: XEl, spans: Span[]): boolean {
+  let changed = false;
+  for (const span of [...spans].sort((a, b) => b.start - a.start)) {
+    const info = readParagraph(p);
+    if (info.locked || span.start < 0 || span.end > info.text.length || span.start >= span.end) continue;
+    let pos = 0;
+    const hits: { item: TextItem; from: number; to: number }[] = [];
+    let blocked = false;
+    for (const it of info.items) {
+      const len = it.kind === "text" ? it.text.length : it.label.length + 4;
+      const a = pos;
+      const b = pos + len;
+      pos = b;
+      if (b <= span.start || a >= span.end) continue;
+      if (it.kind === "atom") {
+        blocked = true;
+        break;
+      }
+      hits.push({ item: it, from: Math.max(0, span.start - a), to: Math.min(len, span.end - a) });
+    }
+    if (blocked || !hits.length) continue;
+    hits.forEach((h, i) => {
+      const t = h.item.text;
+      setRunText(h.item.node, t.slice(0, h.from) + (i === 0 ? span.text : "") + t.slice(h.to));
+    });
+    changed = true;
+  }
+  return changed;
 }
 
 /** Top-level child of `p` that contains `node`. */

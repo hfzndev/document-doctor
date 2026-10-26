@@ -2,8 +2,10 @@
 // Every action re-checks the session and the caller's workspace role.
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { requireDocument, requireTemplate, requireUser, requireWorkspace } from "@/lib/access";
+import { atLeast, requireDocument, requireTemplate, requireUser, requireWorkspace } from "@/lib/access";
 import * as data from "@/lib/data";
+import * as fieldsData from "@/lib/data-fields";
+import { setContext } from "@/lib/render";
 import { deleteTemplateFile } from "@/lib/storage";
 
 const str = (form: FormData, key: string, max = 200) => String(form.get(key) ?? "").trim().slice(0, max);
@@ -130,5 +132,89 @@ export async function deleteDocument(documentId: string) {
   const { document, role } = requireDocument(documentId, user);
   if (document.created_by !== user.id && role === "member") return;
   data.deleteDocument(documentId);
-  redirect(`/w/${document.workspace_id}`);
+  redirect(document.set_id ? `/s/${document.set_id}` : `/w/${document.workspace_id}`);
+}
+
+// ----------------------------------------------------------------- shared fields
+export async function createFieldAction(workspaceId: string, form: FormData) {
+  const user = await requireUser();
+  requireWorkspace(workspaceId, user);
+  const input = fieldsData.parseFieldInput(Object.fromEntries(form));
+  const res = typeof input === "string" ? input : fieldsData.createField(workspaceId, input, user.id);
+  if (typeof res === "string") redirect(`/w/${workspaceId}/fields?error=${encodeURIComponent(res)}`);
+  revalidatePath(`/w/${workspaceId}/fields`);
+}
+
+function requireFieldEditor(field: fieldsData.FieldRow | null, user: data.User) {
+  if (!field) return null;
+  const { role } = requireWorkspace(field.workspace_id, user);
+  // Admins can change any field; members only the ones they created.
+  return atLeast(role, "admin") || field.created_by === user.id ? field : null;
+}
+
+export async function updateFieldAction(fieldId: string, form: FormData) {
+  const user = await requireUser();
+  const field = requireFieldEditor(fieldsData.getField(fieldId), user);
+  if (!field) return;
+  const input = fieldsData.parseFieldInput(Object.fromEntries(form));
+  const err = typeof input === "string" ? input : fieldsData.updateField(field, input);
+  if (err) redirect(`/w/${field.workspace_id}/fields?error=${encodeURIComponent(err)}`);
+  revalidatePath(`/w/${field.workspace_id}/fields`);
+}
+
+export async function deleteFieldAction(fieldId: string) {
+  const user = await requireUser();
+  const field = requireFieldEditor(fieldsData.getField(fieldId), user);
+  if (!field) return;
+  fieldsData.deleteField(fieldId);
+  revalidatePath(`/w/${field.workspace_id}/fields`);
+}
+
+// ----------------------------------------------------------------- document sets
+export async function createSetAction(workspaceId: string, form: FormData) {
+  const user = await requireUser();
+  requireWorkspace(workspaceId, user);
+  const name = str(form, "name") || `Set ${new Date().toISOString().slice(0, 10)}`;
+  const templateIds = form.getAll("templates").map(String);
+  const templates = templateIds
+    .map((id) => data.getTemplate(id))
+    .filter((t): t is data.Template => !!t && t.workspace_id === workspaceId);
+  const setId = fieldsData.createSet(workspaceId, name, user.id);
+  for (const t of templates) data.createDocument(workspaceId, t.id, `${t.name} – ${name}`, user.id, setId);
+  // Assign the set's numbers and dates right away.
+  await setContext(setId, data.listDocuments(workspaceId, { setId }), fieldsData.listFields(workspaceId));
+  redirect(`/s/${setId}`);
+}
+
+function requireSet(setId: string, user: data.User, min: data.Role = "member") {
+  const set = fieldsData.getSet(setId);
+  if (!set) redirect("/");
+  return { set, ...requireWorkspace(set.workspace_id, user, min) };
+}
+
+export async function renameSetAction(setId: string, form: FormData) {
+  const user = await requireUser();
+  requireSet(setId, user);
+  const name = str(form, "name");
+  if (name) fieldsData.renameSet(setId, name);
+  revalidatePath(`/s/${setId}`);
+}
+
+export async function addDocumentToSet(setId: string, form: FormData) {
+  const user = await requireUser();
+  const { set } = requireSet(setId, user);
+  const template = data.getTemplate(str(form, "template"));
+  if (!template || template.workspace_id !== set.workspace_id) return;
+  data.createDocument(set.workspace_id, template.id, `${template.name} – ${set.name}`, user.id, set.id);
+  fieldsData.touchSet(set.id);
+  await setContext(set.id, data.listDocuments(set.workspace_id, { setId }), fieldsData.listFields(set.workspace_id));
+  revalidatePath(`/s/${setId}`);
+}
+
+export async function deleteSetAction(setId: string) {
+  const user = await requireUser();
+  const { set, role } = requireSet(setId, user);
+  if (set.created_by !== user.id && role === "member") return;
+  fieldsData.deleteSet(setId);
+  redirect(`/w/${set.workspace_id}`);
 }

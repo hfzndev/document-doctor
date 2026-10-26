@@ -4,7 +4,8 @@ import { createDocument, deleteTemplate, updateTemplate } from "@/app/actions";
 import { requireTemplate, requireUser } from "@/lib/access";
 import { getTemplate, listDocuments } from "@/lib/data";
 import { fileSize, timeAgo } from "@/lib/format";
-import { TemplatePreview } from "@/components/template-preview";
+import { listFields, listMarks } from "@/lib/data-fields";
+import { TemplateView } from "@/components/template-view";
 import { ConfirmButton, SubmitButton } from "@/components/ui";
 
 export async function generateMetadata({ params }: PageProps<"/t/[id]">): Promise<Metadata> {
@@ -15,7 +16,7 @@ export default async function TemplatePage({ params }: PageProps<"/t/[id]">) {
   const { id } = await params;
   const user = await requireUser(`/t/${id}`);
   const { template, workspace, role } = requireTemplate(id, user);
-  const documents = listDocuments(workspace.id, id);
+  const documents = listDocuments(workspace.id, { templateId: id });
   const canDelete = template.created_by === user.id || role !== "member";
 
   return (
@@ -81,7 +82,7 @@ export default async function TemplatePage({ params }: PageProps<"/t/[id]">) {
           </div>
         </details>
       </aside>
-      <TemplatePreview templateId={id} />
+      <TemplateView templateId={id} workspaceId={workspace.id} fields={listFields(workspace.id)} marks={listMarks(id)} />
     </div>
   );
 }

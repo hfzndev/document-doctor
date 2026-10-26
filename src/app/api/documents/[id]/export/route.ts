@@ -1,9 +1,8 @@
 import { apiError, apiRole, apiUser, HttpError } from "@/lib/access";
 import { getDocument } from "@/lib/data";
-import { applyEdits } from "@/lib/docx/template";
 import { attachment, DOCX_MIME } from "@/lib/http";
 import { docxToPdf } from "@/lib/pdf";
-import { readTemplateFile } from "@/lib/storage";
+import { buildDocx } from "@/lib/render";
 
 // Download the filled-in document as .docx or .pdf (?format=docx|pdf).
 export async function GET(request: Request, ctx: RouteContext<"/api/documents/[id]/export">) {
@@ -17,7 +16,7 @@ export async function GET(request: Request, ctx: RouteContext<"/api/documents/[i
     const format = new URL(request.url).searchParams.get("format") ?? "docx";
     if (format !== "docx" && format !== "pdf") throw new HttpError(400, "format must be docx or pdf");
 
-    const docx = await applyEdits(await readTemplateFile(doc.template_id), JSON.parse(doc.values_json));
+    const docx = await buildDocx(doc);
     if (format === "docx") {
       return new Response(docx as Uint8Array<ArrayBuffer>, {
         headers: { "Content-Type": DOCX_MIME, "Content-Disposition": attachment(doc.title, "docx") },
