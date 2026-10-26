@@ -1,0 +1,16 @@
+services:
+  docs:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9150:3000"   # put your reverse proxy (docs.norflabs.com) in front of this
+    environment:
+      APP_PUBLIC_URL: https://docs.norflabs.com
+      NL_AUTH_BASE_URL: https://auth.norflabs.com
+      NL_APP_SLUG: docs
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env (openssl rand -hex 32)}
+    volumes:
+      - docs-data:/data
+
+volumes:
+  docs-data:
