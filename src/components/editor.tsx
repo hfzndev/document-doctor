@@ -5,8 +5,10 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { applyEdits, extractBlocks, type Block, type Values } from "@/lib/docx/template";
 import { baseTexts, computeEdits, referencedFields, type Field, type FieldValues, type Mark } from "@/lib/fields";
+import { plainText } from "@/lib/docx/rich";
 import { DocxPreview } from "./docx-preview";
 import { FieldDialog, FieldValuesList, useFieldValues } from "./fields";
+import { RichField, type RichFieldHandle } from "./rich-field";
 
 type Props = {
   documentId: string;
@@ -24,7 +26,8 @@ type Props = {
   set: { id: string; name: string; documents: number } | null;
 };
 
-type InsertTarget = { blockId: string | null; start: number; end: number; selected: string };
+/** Where an inserted field goes: a paragraph's field (null when only creating a field). */
+type InsertTarget = { field: RichFieldHandle | null; selected: string };
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
 
@@ -129,7 +132,7 @@ export function Editor(props: Props) {
   // A block's starting text: the template text, with marked ranges shown as {{Field}}.
   const bases = useMemo(() => (blocks ? baseTexts(blocks, props.marks, fields) : new Map<string, string>()), [blocks, props.marks, fields]);
   const original = useMemo(
-    () => new Map(blocks?.map((b) => [b.id, bases.get(b.id) ?? b.text]) ?? []),
+    () => new Map(blocks?.map((b) => [b.id, bases.get(b.id) ?? b.rich]) ?? []),
     [blocks, bases],
   );
   const referenced = useMemo(
@@ -147,20 +150,19 @@ export function Editor(props: Props) {
     ensure(missing.map((f) => f.id));
   }, [referenced.used, fv.values, ensure]);
 
+  const queuedToken = useRef<string | null>(null);
   async function pickField(field: Field, created: boolean) {
     if (created) setFields((list) => [...list, field].sort((a, b) => a.name.localeCompare(b.name)));
     const target = insert;
-    if (!target?.blockId) return;
-    const b = blocks?.find((x) => x.id === target.blockId);
-    if (!b) return;
-    const current = values[b.id] ?? original.get(b.id) ?? b.text;
-    setText(b.id, current.slice(0, target.start) + `{{${field.name}}}` + current.slice(target.end));
+    if (!target?.field) return;
+    queuedToken.current = `{{${field.name}}}`;
     // "Select text → make field": the selected text becomes the value if there is none yet.
     if (target.selected && fv.values[field.id] === undefined && field.type !== "date") {
       ensured.current.add(field.id);
       await fv.ensure([field.id], { [field.id]: target.selected });
     }
   }
+
 
   const setText = useCallback(
     (id: string, text: string) => {
@@ -202,7 +204,7 @@ export function Editor(props: Props) {
   // ---------------------------------------------------------------- grouping
   const q = query.trim().toLowerCase();
   const visible = (blocks ?? []).filter((b) => {
-    const text = values[b.id] ?? original.get(b.id) ?? b.text;
+    const text = plainText(values[b.id] ?? original.get(b.id) ?? b.rich);
     if (!showEmpty && b.empty && !(b.id in values)) return false;
     return !q || text.toLowerCase().includes(q) || b.style.toLowerCase().includes(q);
   });
@@ -264,7 +266,14 @@ export function Editor(props: Props) {
             "Fields are typed once and appear in every document that uses them."
           )
         }
-        onClose={() => setInsert(null)}
+        onClose={() => {
+          // Type the token only once the dialog is gone: a modal dialog blocks focus elsewhere.
+          const token = queuedToken.current;
+          const target = insert?.field;
+          queuedToken.current = null;
+          setInsert(null);
+          if (token && target) requestAnimationFrame(() => target.insert(token));
+        }}
         onPick={pickField}
       />
 
@@ -333,7 +342,7 @@ export function Editor(props: Props) {
                       className="font-medium underline"
                       onClick={() => {
                         setNewFieldName(name);
-                        setInsert({ blockId: null, start: 0, end: 0, selected: "" });
+                        setInsert({ field: null, selected: "" });
                       }}
                     >
                       Create it
@@ -352,15 +361,15 @@ export function Editor(props: Props) {
                     <BlockField
                       key={b.id}
                       block={b}
-                      value={values[b.id] ?? original.get(b.id) ?? b.text}
-                      base={original.get(b.id) ?? b.text}
+                      value={values[b.id] ?? original.get(b.id) ?? b.rich}
+                      base={original.get(b.id) ?? b.rich}
                       edited={b.id in values}
                       focused={focusId === b.id}
                       onFocus={() => setFocusId(b.id)}
                       onChange={(text) => setText(b.id, text)}
-                      onInsertField={(start, end, selected) => {
+                      onInsertField={(field, selected) => {
                         setNewFieldName(undefined);
-                        setInsert({ blockId: b.id, start, end, selected });
+                        setInsert({ field, selected });
                       }}
                     />
                   ))}
@@ -390,12 +399,13 @@ function SaveBadge({ state, onRetry }: { state: SaveState; onRetry: () => void }
   return <span className={`text-xs ${state === "saved" ? "text-slate-400" : "text-amber-600"}`}>{text}</span>;
 }
 
+// Sizes only: bold / italic come from the document itself.
 const KIND_CLASS: Record<string, string> = {
-  title: "text-2xl font-semibold tracking-tight",
+  title: "text-2xl tracking-tight",
   subtitle: "text-lg text-slate-600",
-  h1: "text-xl font-semibold",
-  h2: "text-lg font-semibold",
-  h3: "text-base font-semibold",
+  h1: "text-xl",
+  h2: "text-lg",
+  h3: "text-base",
   list: "text-sm",
   body: "text-sm leading-relaxed",
 };
@@ -416,32 +426,29 @@ function BlockField({
   edited: boolean;
   focused: boolean;
   onFocus: () => void;
-  onChange: (text: string) => void;
-  onInsertField: (start: number, end: number, selected: string) => void;
+  onChange: (markup: string) => void;
+  onInsertField: (field: RichFieldHandle, selected: string) => void;
 }) {
-  const [hasSelection, setHasSelection] = useState(false);
-  const ref = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const grow = () => {
-      if (!el.offsetParent) return; // hidden (mobile preview tab): measure when shown
-      el.style.height = "auto";
-      el.style.height = `${el.scrollHeight + 2}px`;
-    };
-    grow();
-    const ro = new ResizeObserver(grow);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [value]);
+  const handle = useRef<RichFieldHandle>(null);
+  const [state, setState] = useState({ b: false, i: false, u: false, selected: false });
+  const onSelectionChange = useCallback((s: typeof state) => setState(s), []);
 
   const kindKey =
     block.kind === "heading" ? (block.level <= 1 ? "h1" : block.level === 2 ? "h2" : "h3") : block.kind;
   const hasTokens = /\[\[[^\]]+\]\]/.test(block.text);
-  const trackSelection = () => {
-    const el = ref.current;
-    setHasSelection(!!el && el.selectionEnd > el.selectionStart);
-  };
+  const tool = (key: "b" | "i" | "u", cmd: "bold" | "italic" | "underline", label: string, cls: string) => (
+    <button
+      type="button"
+      title={`${label} (${typeof navigator !== "undefined" && /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+"}${key.toUpperCase()})`}
+      aria-label={label}
+      aria-pressed={state[key]}
+      className={`h-6 w-6 rounded text-[13px] ${cls} ${state[key] ? "bg-brand-100 text-brand-700" : "text-slate-600 hover:bg-slate-200"}`}
+      onMouseDown={(e) => e.preventDefault()} // keep the selection in the field
+      onClick={() => handle.current?.format(cmd)}
+    >
+      {key.toUpperCase()}
+    </button>
+  );
 
   return (
     <div
@@ -449,23 +456,32 @@ function BlockField({
         focused ? "border-brand-500 bg-brand-50/60" : edited ? "border-amber-400" : "border-transparent hover:bg-slate-50"
       }`}
     >
-      <div className="mb-0.5 flex items-center gap-1.5">
+      <div className="mb-0.5 flex min-h-6 items-center gap-1.5">
         <span className="chip">{block.style}</span>
         {block.inTable && <span className="chip">Table</span>}
         {block.locked && <span className="chip bg-slate-200">Read-only field</span>}
         {edited && <span className="text-[11px] font-medium text-amber-600">Edited</span>}
         <div className="flex-1" />
         {focused && !block.locked && (
-          <button
-            className="rounded px-1.5 text-[11px] font-medium text-brand-700 hover:bg-brand-100"
-            onMouseDown={(e) => e.preventDefault()} // keep the textarea selection
-            onClick={() => {
-              const el = ref.current!;
-              onInsertField(el.selectionStart, el.selectionEnd, el.value.slice(el.selectionStart, el.selectionEnd).trim() ? el.value.slice(el.selectionStart, el.selectionEnd) : "");
-            }}
-          >
-            {hasSelection ? "Make field" : "+ Field"}
-          </button>
+          <div className="flex items-center gap-0.5" role="toolbar" aria-label="Formatting">
+            {tool("b", "bold", "Bold", "font-bold")}
+            {tool("i", "italic", "Italic", "italic font-serif")}
+            {tool("u", "underline", "Underline", "underline")}
+            <span className="mx-1 h-4 w-px bg-slate-300" />
+            <button
+              type="button"
+              className="rounded px-1.5 text-[11px] font-medium text-brand-700 hover:bg-brand-100"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                const h = handle.current;
+                if (!h) return;
+                const selected = h.captureSelection();
+                onInsertField(h, selected.trim() ? selected : "");
+              }}
+            >
+              {state.selected ? "Make field" : "+ Field"}
+            </button>
+          </div>
         )}
         {edited && (
           <button
@@ -478,18 +494,15 @@ function BlockField({
       </div>
       <div className="flex gap-1.5">
         {block.kind === "list" && <span className="pt-1.5 text-slate-400">•</span>}
-        <textarea
-          ref={ref}
-          rows={1}
+        <RichField
+          handleRef={handle}
           value={value}
           readOnly={block.locked}
           onFocus={onFocus}
-          onChange={(e) => onChange(e.target.value)}
-          onSelect={trackSelection}
-          onMouseUp={trackSelection}
-          onKeyUp={trackSelection}
+          onChange={onChange}
+          onSelectionChange={onSelectionChange}
           placeholder="(empty line)"
-          className={`w-full resize-none overflow-hidden rounded-md border border-transparent bg-transparent px-1.5 py-1 hover:border-slate-200 focus:border-brand-500 focus:bg-white focus:outline-none ${KIND_CLASS[kindKey]} ${block.locked ? "text-slate-500" : ""}`}
+          className={`w-full rounded-md border border-transparent bg-transparent px-1.5 py-1 hover:border-slate-200 focus:border-brand-500 focus:bg-white focus:outline-none ${KIND_CLASS[kindKey]} ${block.locked ? "text-slate-500" : ""}`}
         />
       </div>
       {focused && hasTokens && (

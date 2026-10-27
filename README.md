@@ -23,13 +23,17 @@ Sign-in goes through **[Norflabs Auth](https://auth.norflabs.com)** (app slug `d
 ### What is kept when you edit
 
 - **Paragraphs you don't touch stay byte-for-byte identical**, with all their formatting.
+- **Bold, italic and underline** are edited directly: use the **B** / *I* / U buttons on the
+  focused paragraph, or Ctrl/⌘+B / I / U. The editor shows the document's real formatting,
+  including bold or italic that comes from a style (a bold Heading 1 shows as bold). When saved,
+  formatting that matches the style stays style-based; only differences become direct formatting.
 - An edited paragraph keeps its paragraph style (heading level, alignment, numbering, spacing) and
-  takes the character formatting (font, size, colour, bold…) of its **first** run. Mixed formatting
-  inside one paragraph, such as a single bold word, is flattened only in paragraphs you edit.
+  takes its other character formatting (font, size, colour, highlight…) from its **first** run. A
+  different font or colour on a single word is flattened only in paragraphs you edit.
 - Things that aren't plain text show up as tokens: `Page [[PAGE]] of [[NUMPAGES]]`, `[[image]]`,
   `[[page break]]`, `[[footnote]]`… Leave a token where you want the item and it stays live. Delete
   it to remove the item.
-- Line breaks (Enter) become Word line breaks and Tab becomes a tab.
+- Enter adds a Word line break inside the paragraph. Pasting inserts plain text only.
 - Paragraphs belonging to a field that spans several paragraphs, like a table of contents, are
   shown read-only.
 
@@ -159,7 +163,8 @@ npm run typecheck
 
 ```
 src/lib/docx/        template engine, runs in both the browser (preview) and the server (export)
-  paragraph.ts       one <w:p> ⇄ editable text with [[tokens]]; in-place span replacement
+  paragraph.ts       one <w:p> ⇄ rich text with [[tokens]]; effective b/i/u from styles; span replacement
+  rich.ts            the <b> <i> <u> markup used for block content (parse / serialize / ranges)
   template.ts        parts, block ids, styles, extractBlocks() / applyEdits()
 src/lib/fields.ts    shared fields: formats, number patterns, {{tokens}}, marks → edits (shared)
 src/lib/data-fields.ts  fields, counters, template marks, sets, field values (SQL)
@@ -170,13 +175,13 @@ src/lib/access.ts    authorization helpers used by every page / action / route
 src/lib/pdf.ts       LibreOffice conversion (serialized, throwaway profile per run)
 src/app/actions.ts   server actions (workspaces, members, invites, templates, documents)
 src/app/api/…        auth, template upload/download, autosave, export
-src/components/      editor, live preview (docx-preview), upload
+src/components/      editor, rich paragraph field, live preview (docx-preview), upload
 ```
 
 ## Known limitations
 
-- **Plain-text editing.** Edited paragraphs take one formatting (that of their first run). Rich
-  formatting such as bold/italic toolbars isn't supported yet.
+- **Formatting is limited to bold, italic and underline.** Fonts, sizes, colours and highlights
+  come from the template and can't be changed in the editor.
 - **The preview is an approximation.** It's rendered in the browser with `docx-preview`, and
   details like bullet glyphs and exact line breaks can differ. The PDF (LibreOffice) is the
   faithful version.

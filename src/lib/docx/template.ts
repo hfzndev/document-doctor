@@ -1,7 +1,15 @@
 // Template engine: turn a .docx into editable blocks and write edits back.
 // Runs unchanged on the server (export) and in the browser (live preview).
 import JSZip from "jszip";
-import { readParagraph, writeParagraph, writeSpans, type Span } from "./paragraph";
+import {
+  EMPTY_FORMAT,
+  readFlags,
+  readParagraph,
+  writeParagraph,
+  writeSpans,
+  type FormatContext,
+  type Span,
+} from "./paragraph";
 import {
   child,
   children,
@@ -34,13 +42,17 @@ export type Block = {
   kind: BlockKind;
   level: number;
   inTable: boolean;
+  /** Plain text; template marks use offsets into this. */
   text: string;
+  /** Text with bold / italic / underline as markup (see rich.ts). Editor values use this format. */
+  rich: string;
   locked: boolean;
   empty: boolean;
 };
 
+/** Block id -> edited content as rich markup. */
 export type Values = Record<string, string>;
-/** Per block: new full text, or character ranges to replace (keeps run formatting). */
+/** Per block: new rich markup, or plain character ranges to replace (keeps run formatting). */
 export type Edits = Record<string, string | Span[]>;
 export type { Span };
 
@@ -119,21 +131,36 @@ function paragraphs(doc: XDoc): XEl[] {
   return all;
 }
 
-type StyleInfo = { names: Map<string, string>; outline: Map<string, number>; defaultName: string };
+type StyleInfo = {
+  names: Map<string, string>;
+  outline: Map<string, number>;
+  defaultName: string;
+  format: FormatContext;
+};
 
 async function styles(zip: JSZip): Promise<StyleInfo> {
-  const info: StyleInfo = { names: new Map(), outline: new Map(), defaultName: "Normal" };
+  const format: FormatContext = { styles: new Map(), defaults: {}, defaultParagraphStyle: null };
+  const info: StyleInfo = { names: new Map(), outline: new Map(), defaultName: "Normal", format };
   const doc = await readXml(zip, "word/styles.xml");
   if (!doc) return info;
+  const rPrDefault = descendantsW(doc, "rPrDefault")[0];
+  format.defaults = readFlags(rPrDefault ? child(rPrDefault, "rPr") : null);
   for (const s of descendantsW(doc, "style")) {
-    if (wAttr(s, "type") !== "paragraph") continue;
+    const type = wAttr(s, "type");
     const id = wAttr(s, "styleId") ?? "";
+    if (type === "paragraph" || type === "character") {
+      format.styles.set(id, { basedOn: wAttr(child(s, "basedOn"), "val"), flags: readFlags(child(s, "rPr")) });
+    }
+    if (type !== "paragraph") continue;
     const name = wAttr(child(s, "name"), "val") ?? id;
     info.names.set(id, name);
     const pPr = child(s, "pPr");
     const lvl = wAttr(pPr && child(pPr, "outlineLvl"), "val");
     if (lvl !== null && lvl !== "9") info.outline.set(id, Number(lvl) + 1);
-    if (wAttr(s, "default") === "1" || s.getAttributeNS(W_NS, "default") === "true") info.defaultName = name;
+    if (wAttr(s, "default") === "1" || s.getAttributeNS(W_NS, "default") === "true") {
+      info.defaultName = name;
+      format.defaultParagraphStyle = id;
+    }
   }
   return info;
 }
@@ -175,7 +202,7 @@ export async function extractBlocks(data: ArrayBuffer | Uint8Array): Promise<Blo
     const doc = ref.part === DOCUMENT ? main : await readXml(zip, ref.part);
     if (!doc) continue;
     paragraphs(doc).forEach((p, i) => {
-      const info = readParagraph(p);
+      const info = readParagraph(p, st.format);
       blocks.push({
         id: `${ref.part}#${i}`,
         part: ref.part,
@@ -184,6 +211,7 @@ export async function extractBlocks(data: ArrayBuffer | Uint8Array): Promise<Blo
         ...classify(p, st),
         inTable: hasAncestor(p, (a) => isW(a, "tc")),
         text: info.text,
+        rich: info.rich,
         locked: info.locked,
         empty: info.text.trim() === "",
       });
@@ -218,6 +246,7 @@ export async function applyEdits(
     touch(focus.part);
   }
 
+  const format = byPart.size ? (await styles(zip)).format : EMPTY_FORMAT;
   for (const [part, edits] of byPart) {
     // Only word/*.xml parts that exist can be edited; ids are untrusted input.
     if (!/^word\/[\w.-]+\.xml$/.test(part) || !zip.file(part)) continue;
@@ -227,7 +256,7 @@ export async function applyEdits(
     for (const [index, edit] of edits) {
       const p = paras[index];
       if (!p) continue;
-      if (typeof edit === "string" ? writeParagraph(p, edit) : writeSpans(p, edit)) changed = true;
+      if (typeof edit === "string" ? writeParagraph(p, edit, format) : writeSpans(p, edit)) changed = true;
     }
     if (focus?.part === part && paras[focus.index]) {
       addFocusBookmark(paras[focus.index]);

@@ -5,6 +5,7 @@
 // In editable text a field is written {{Field name}}. A template "mark" turns a character
 // range of a template paragraph into a field; when that paragraph is not otherwise edited
 // only those characters are replaced, so the rest of the paragraph keeps its formatting.
+import { escapeText, parseMarkup, replaceRange, toMarkup } from "./docx/rich";
 import type { Block, Edits, Span, Values } from "./docx/template";
 
 export type FieldType = "text" | "date" | "number";
@@ -28,7 +29,7 @@ export type FieldValues = Record<string, string>;
 
 export const FIELD_TOKEN_RE = /\{\{([^{}\n]{1,60})\}\}/g;
 const HAS_TOKEN_RE = /\{\{[^{}\n]{1,60}\}\}/;
-export const FIELD_NAME_RE = /^[^{}[\]\n]{1,60}$/;
+export const FIELD_NAME_RE = /^[^{}[\]<>&\n]{1,60}$/;
 
 export const DATE_FORMATS: Record<DateFormat, string> = {
   id_long: "26 Oktober 2026",
@@ -92,13 +93,16 @@ export function tokenNames(text: string): string[] {
   return Array.from(text.matchAll(FIELD_TOKEN_RE), (m) => m[1]);
 }
 
-/** Replace {{Field name}} tokens with values. Unknown or empty fields are left as tokens. */
-export function resolveTokens(text: string, fields: Field[], values: FieldValues): string {
+/**
+ * Replace {{Field name}} tokens with values. Unknown or empty fields are left as tokens.
+ * `markup`: the text is rich markup, so values are escaped.
+ */
+export function resolveTokens(text: string, fields: Field[], values: FieldValues, markup = false): string {
   const byName = new Map(fields.map((f) => [normName(f.name), f]));
   return text.replace(FIELD_TOKEN_RE, (token, name: string) => {
     const field = byName.get(normName(name));
     const value = field && formatValue(field, values[field.id]);
-    return value || token;
+    return value ? (markup ? escapeText(value) : value) : token;
   });
 }
 
@@ -108,21 +112,21 @@ export function marksByBlock(marks: Mark[]): Map<string, Mark[]> {
   return map;
 }
 
-/** Template text of a block with its marked ranges shown as {{Field name}}. */
+/** Template content of a block (rich markup) with its marked ranges shown as {{Field name}}. */
 export function baseText(block: Block, marks: Mark[] | undefined, fieldsById: Map<string, Field>): string {
-  if (!marks?.length) return block.text;
-  let out = "";
-  let pos = 0;
-  for (const m of marks) {
+  if (!marks?.length) return block.rich;
+  let segs = parseMarkup(block.rich);
+  let floor = Infinity;
+  for (const m of [...marks].sort((a, b) => b.start - a.start)) {
     const f = fieldsById.get(m.field_id);
-    if (!f || m.start < pos) continue;
-    out += block.text.slice(pos, m.start) + `{{${f.name}}}`;
-    pos = m.end;
+    if (!f || m.end > floor) continue; // overlapping marks: keep the later one
+    segs = replaceRange(segs, m.start, m.end, `{{${f.name}}}`);
+    floor = m.start;
   }
-  return out + block.text.slice(pos);
+  return toMarkup(segs);
 }
 
-/** Base texts for every block that has marks. */
+/** Base content (rich markup) for every block that has marks. */
 export function baseTexts(blocks: Block[], marks: Mark[], fields: Field[]): Map<string, string> {
   const byId = new Map(fields.map((f) => [f.id, f]));
   const byBlock = marksByBlock(marks);
@@ -148,7 +152,7 @@ export function computeEdits(
   for (const b of blocks) {
     const edited = docValues[b.id];
     if (edited !== undefined) {
-      edits[b.id] = resolveTokens(edited, fields, values);
+      edits[b.id] = resolveTokens(edited, fields, values, true);
       continue;
     }
     const ms = byBlock.get(b.id);
@@ -161,7 +165,7 @@ export function computeEdits(
       edits[b.id] = spans;
     } else if (HAS_TOKEN_RE.test(b.text)) {
       // The template itself contains {{tokens}}.
-      edits[b.id] = resolveTokens(b.text, fields, values);
+      edits[b.id] = resolveTokens(b.rich, fields, values, true);
     }
   }
   return edits;

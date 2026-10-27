@@ -1,21 +1,36 @@
-// One Word paragraph (<w:p>) as plain editable text.
+// One Word paragraph (<w:p>) as editable rich text (see rich.ts: text + <b> <i> <u>).
 //
-// Text runs become plain text. Everything that is not plain text (page-number fields, images,
-// page breaks, footnote marks, equations...) becomes an "atom" shown as a [[TOKEN]] in the
-// text. On write, atoms are kept as their original XML nodes wherever the user left the
-// token, so a footer "Page [[PAGE]] of [[NUMPAGES]]" keeps working page numbers.
+// Text runs become text; their effective bold / italic / underline (direct formatting, then
+// the character style, then the paragraph style, then the document defaults) becomes markup.
+// Everything that is not plain text (page-number fields, images, page breaks, footnote
+// marks, equations...) becomes an "atom" shown as a [[TOKEN]] in the text. On write, atoms
+// are kept as their original XML nodes wherever the user left the token, so a footer
+// "Page [[PAGE]] of [[NUMPAGES]]" keeps working page numbers.
 //
 // Paragraphs the user did not change are never touched. An edited paragraph keeps its
-// paragraph properties (style, alignment, numbering) and takes the character formatting of
-// its first text run.
+// paragraph properties (style, alignment, numbering) and takes the other character
+// formatting (font, size, colour...) of its first text run.
+import { canonical, parseMarkup, toMarkup, type Flags, type Seg } from "./rich";
 import { child, children, isW, W_NS, wAttr, type XEl } from "./xml";
 
-type TextItem = { kind: "text"; node: XEl; text: string };
+/** Bold / italic / underline defined by styles, used to resolve a run's effective formatting. */
+export type FormatContext = {
+  styles: Map<string, { basedOn: string | null; flags: Partial<Flags> }>;
+  defaults: Partial<Flags>;
+  defaultParagraphStyle: string | null;
+};
+
+export const EMPTY_FORMAT: FormatContext = { styles: new Map(), defaults: {}, defaultParagraphStyle: null };
+
+type TextItem = { kind: "text"; node: XEl; text: string; flags: Flags };
 type AtomItem = { kind: "atom"; nodes: XEl[]; label: string };
 type Item = TextItem | AtomItem;
 
 export type ParagraphInfo = {
+  /** Plain text (offsets of template marks refer to this). */
   text: string;
+  /** The same text as markup with bold / italic / underline. */
+  rich: string;
   items: Item[];
   /** A field starts or ends outside this paragraph (e.g. a table of contents): read-only. */
   locked: boolean;
@@ -87,6 +102,82 @@ function fieldName(instr: string): string {
   return word ? word.toUpperCase() : "field";
 }
 
+/** w:b / w:i / w:u inside an rPr-like element: true, false, or undefined when not set. */
+export function readFlags(rPr: XEl | null): Partial<Flags> {
+  const out: Partial<Flags> = {};
+  if (!rPr) return out;
+  for (const tag of ["b", "i"] as const) {
+    const el = child(rPr, tag);
+    if (el) out[tag] = !["0", "false", "off"].includes(wAttr(el, "val") ?? "1");
+  }
+  const u = child(rPr, "u");
+  if (u) out.u = (wAttr(u, "val") ?? "single") !== "none";
+  return out;
+}
+
+/** Formatting a run would have without its own w:b / w:i / w:u. */
+function inheritedFlags(p: XEl, rPr: XEl | null, ctx: FormatContext): Flags {
+  const out: Partial<Flags> = {};
+  const apply = (styleId: string | null) => {
+    for (let id = styleId, guard = 0; id && guard < 20; guard++) {
+      const st = ctx.styles.get(id);
+      if (!st) break;
+      for (const k of ["b", "i", "u"] as const) if (out[k] === undefined && st.flags[k] !== undefined) out[k] = st.flags[k];
+      id = st.basedOn;
+    }
+  };
+  apply(wAttr(rPr && child(rPr, "rStyle"), "val"));
+  const pPr = child(p, "pPr");
+  apply(wAttr(pPr && child(pPr, "pStyle"), "val") ?? ctx.defaultParagraphStyle);
+  return { b: out.b ?? ctx.defaults.b ?? false, i: out.i ?? ctx.defaults.i ?? false, u: out.u ?? ctx.defaults.u ?? false };
+}
+
+function effectiveFlags(p: XEl, rPr: XEl | null, ctx: FormatContext): Flags {
+  return { ...inheritedFlags(p, rPr, ctx), ...readFlags(rPr) } as Flags;
+}
+
+// CT_RPr is an ordered sequence; Word rejects files with children out of order.
+const RPR_ORDER = [
+  "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "dstrike", "outline", "shadow",
+  "emboss", "imprint", "noProof", "snapToGrid", "vanish", "webHidden", "color", "spacing", "w", "kern",
+  "position", "sz", "szCs", "highlight", "u", "effect", "bdr", "shd", "fitText", "vertAlign", "rtl", "cs", "em",
+  "lang", "eastAsianLayout", "specVanish", "oMath",
+];
+
+function setRPrChild(rPr: XEl, tag: string, val: string | null) {
+  const doc = rPr.ownerDocument!;
+  const old = child(rPr, tag);
+  if (old) rPr.removeChild(old);
+  const el = doc.createElementNS(W_NS, `w:${tag}`);
+  if (val !== null) el.setAttributeNS(W_NS, "w:val", val);
+  const rank = RPR_ORDER.indexOf(tag);
+  const next = children(rPr).find((c) => {
+    const r = RPR_ORDER.indexOf(c.localName ?? "");
+    return r > rank || r === -1;
+  });
+  rPr.insertBefore(el, next ?? null);
+}
+
+/** rPr for new text with the wanted formatting, adding direct formatting only where needed. */
+function rPrWithFlags(p: XEl, base: XEl | null, want: Flags, ctx: FormatContext): XEl | null {
+  const rPr = (base?.cloneNode(true) as XEl | undefined) ?? p.ownerDocument!.createElementNS(W_NS, "w:rPr");
+  const inherited = inheritedFlags(p, rPr, ctx);
+  const direct = readFlags(rPr);
+  for (const k of ["b", "i", "u"] as const) {
+    const current = direct[k] ?? inherited[k];
+    if (current === want[k]) continue;
+    if (want[k] === inherited[k]) {
+      const el = child(rPr, k);
+      if (el) rPr.removeChild(el);
+    } else if (k === "u") {
+      setRPrChild(rPr, "u", want.u ? "single" : "none");
+    } else {
+      setRPrChild(rPr, k, want[k] ? null : "0");
+    }
+  }
+  return children(rPr).length ? rPr : null;
+}
+
 function fldChars(run: XEl): string[] {
   return children(run)
     .filter((c) => isW(c, "fldChar"))
@@ -94,7 +185,7 @@ function fldChars(run: XEl): string[] {
 }
 
 /** Read a paragraph into editable text + the items needed to write it back. */
-export function readParagraph(p: XEl): ParagraphInfo {
+export function readParagraph(p: XEl, ctx: FormatContext = EMPTY_FORMAT): ParagraphInfo {
   const items: Item[] = [];
   let locked = false;
   let field: XEl[] | null = null;
@@ -128,7 +219,7 @@ export function readParagraph(p: XEl): ParagraphInfo {
         }
         const text = runText(el);
         if (text === null) items.push({ kind: "atom", nodes: [el], label: atomLabel([el]) });
-        else if (text) items.push({ kind: "text", node: el, text });
+        else if (text) items.push({ kind: "text", node: el, text, flags: effectiveFlags(p, child(el, "rPr"), ctx) });
         continue;
       }
       if (el.namespaceURI === W_NS && TRANSPARENT.has(el.localName ?? "")) {
@@ -151,7 +242,10 @@ export function readParagraph(p: XEl): ParagraphInfo {
   if (field) locked = true;
 
   const text = items.map((it) => (it.kind === "text" ? it.text : `[[${it.label}]]`)).join("");
-  return { text, items, locked };
+  const segs: Seg[] = items.map((it) =>
+    it.kind === "text" ? { ...it.flags, text: it.text } : { b: false, i: false, u: false, text: `[[${it.label}]]` },
+  );
+  return { text, rich: toMarkup(segs), items, locked };
 }
 
 /** Run properties for new text: the first text run's, else the paragraph mark's. */
@@ -247,28 +341,30 @@ function topLevel(p: XEl, node: XEl): XEl {
 }
 
 /**
- * Replace the paragraph's text. Returns false when nothing was changed (same text, or the
- * paragraph is locked).
+ * Replace the paragraph's content with `markup` (rich.ts format). Returns false when nothing
+ * was changed (same content, or the paragraph is locked).
  */
-export function writeParagraph(p: XEl, newText: string): boolean {
-  const info = readParagraph(p);
-  newText = newText.replace(/\r\n?/g, "\n");
-  if (info.locked || newText === info.text) return false;
+export function writeParagraph(p: XEl, markup: string, ctx: FormatContext = EMPTY_FORMAT): boolean {
+  const info = readParagraph(p, ctx);
+  const next = canonical(markup.replace(/\r\n?/g, "\n"));
+  if (info.locked || next === info.rich) return false;
 
-  // Split new text into literal text and references to the original atoms.
+  // Split new content into formatted text and references to the original atoms.
   const atoms = info.items.filter((i): i is AtomItem => i.kind === "atom");
   const used = new Set<AtomItem>();
-  const segments: (string | AtomItem)[] = [];
-  let last = 0;
-  for (const m of newText.matchAll(TOKEN_RE)) {
-    const atom = atoms.find((a) => !used.has(a) && a.label === m[1]);
-    if (!atom) continue; // unknown token: keep as literal text
-    used.add(atom);
-    if (m.index! > last) segments.push(newText.slice(last, m.index));
-    segments.push(atom);
-    last = m.index! + m[0].length;
+  const segments: (Seg | AtomItem)[] = [];
+  for (const seg of parseMarkup(next)) {
+    let last = 0;
+    for (const m of seg.text.matchAll(TOKEN_RE)) {
+      const atom = atoms.find((a) => !used.has(a) && a.label === m[1]);
+      if (!atom) continue; // unknown token: keep as literal text
+      used.add(atom);
+      if (m.index! > last) segments.push({ ...seg, text: seg.text.slice(last, m.index) });
+      segments.push(atom);
+      last = m.index! + m[0].length;
+    }
+    if (last < seg.text.length) segments.push({ ...seg, text: seg.text.slice(last) });
   }
-  if (last < newText.length) segments.push(newText.slice(last));
 
   const rPr = templateRPr(p, info);
   const doc = p.ownerDocument!;
@@ -291,8 +387,8 @@ export function writeParagraph(p: XEl, newText: string): boolean {
     }
   }
   for (const seg of segments) {
-    if (typeof seg === "string") p.insertBefore(makeRun(p, rPr, seg), anchor);
-    else for (const n of seg.nodes) p.insertBefore(n, anchor);
+    if ("kind" in seg) for (const n of seg.nodes) p.insertBefore(n, anchor);
+    else p.insertBefore(makeRun(p, rPrWithFlags(p, rPr, seg, ctx), seg.text), anchor);
   }
   p.removeChild(anchor);
 
